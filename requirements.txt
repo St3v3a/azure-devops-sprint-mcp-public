@@ -1,0 +1,13 @@
+# Azure DevOps Sprint MCP Server Dependencies
+
+# Core dependencies
+fastmcp>=0.4.0
+azure-devops>=7.1.0b4
+azure-identity>=1.15.0
+python-dotenv>=1.0.0
+
+# Development dependencies (optional)
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+ruff>=0.1.0

@@ -1,0 +1,39 @@
+# Development docker-compose override
+# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+
+services:
+  mcp-server:
+    # Build with development dependencies
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        - INSTALL_DEV=true
+
+    # Override image name for dev
+    image: azure-devops-sprint-mcp:dev
+
+    # Mount source code for hot reload
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./logs:/app/logs
+      - ./cache:/app/cache
+      # Azure credentials for user context (inherited from main compose file)
+      # Note: Azure CLI needs write access for command logs
+      - ${HOME}/.azure:/home/mcpuser/.azure
+
+    # Override command for development (with auto-reload)
+    command: python -m src.server --reload
+
+    # Additional environment for development
+    environment:
+      - DEBUG=1
+      - LOG_LEVEL=DEBUG
+
+    # No resource limits in development
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G

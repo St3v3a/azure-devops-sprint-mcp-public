@@ -1,0 +1,64 @@
+# Development Dockerfile with hot reload support
+# For local development only - not for production
+
+FROM python:3.11-slim
+
+# Set metadata
+LABEL maintainer="your-email@company.com"
+LABEL description="Azure DevOps Sprint MCP Server (Development)"
+LABEL version="2.0-dev"
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBUG=1 \
+    LOG_LEVEL=DEBUG \
+    # Set Azure DevOps cache to writable location
+    AZURE_DEVOPS_CACHE_DIR=/app/cache/.azure-devops
+
+# Install system dependencies including development tools and Azure CLI
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    git \
+    curl \
+    ca-certificates \
+    && curl -sL https://aka.ms/InstallAzureCLIDeb | bash \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user for security with home directory
+RUN groupadd -r mcpuser && \
+    useradd -r -g mcpuser -u 1000 -m -d /home/mcpuser mcpuser
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements
+COPY requirements.txt .
+
+# Install Python dependencies (including dev dependencies)
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir \
+        watchdog \
+        pytest-watch \
+        ipython
+
+# Copy application code
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY README.md CLAUDE.md ./
+
+# Create directories and set ownership
+RUN mkdir -p /app/logs /app/cache && \
+    chown -R mcpuser:mcpuser /app && \
+    chown -R mcpuser:mcpuser /home/mcpuser
+
+# Switch to non-root user
+USER mcpuser
+
+# Expose port
+EXPOSE 8000
+
+# Default command (can be overridden)
+CMD ["python", "-m", "src.server"]
