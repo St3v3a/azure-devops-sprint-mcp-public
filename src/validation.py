@@ -6,7 +6,7 @@ and ensure data integrity for Azure DevOps API operations.
 """
 
 import re
-from typing import Optional, List, Set
+from typing import Optional, List, Set, Any
 
 
 class ValidationError(Exception):
@@ -552,3 +552,139 @@ def validate_severity(severity: Optional[int]) -> Optional[int]:
 def sanitize_wiql_string(value: str) -> str:
     """Sanitize a string value for use in WIQL queries."""
     return WiqlValidator.sanitize_string_literal(value)
+
+
+def validate_field_value(field_name: str, value: Any) -> Any:
+    """
+    Validate a field value based on the field type.
+
+    This prevents type confusion, XSS attacks, and invalid data.
+
+    Args:
+        field_name: The field reference name
+        value: The value to validate
+
+    Returns:
+        The validated/sanitized value
+
+    Raises:
+        ValidationError: If the value is invalid for the field
+    """
+    # Normalize field name
+    clean_field_name = field_name.replace('/fields/', '')
+
+    # State field validation
+    if clean_field_name == 'System.State':
+        if not isinstance(value, str):
+            raise ValidationError(f"System.State must be a string, got {type(value).__name__}")
+        return validate_state(value)
+
+    # Priority field validation
+    if clean_field_name == 'Microsoft.VSTS.Common.Priority':
+        if not isinstance(value, int):
+            raise ValidationError(f"Priority must be an integer, got {type(value).__name__}")
+        return validate_priority(value)
+
+    # Severity field validation
+    if clean_field_name == 'Microsoft.VSTS.Common.Severity':
+        if not isinstance(value, int):
+            raise ValidationError(f"Severity must be an integer, got {type(value).__name__}")
+        return validate_severity(value)
+
+    # Work item type validation
+    if clean_field_name == 'System.WorkItemType':
+        if not isinstance(value, str):
+            raise ValidationError(f"WorkItemType must be a string, got {type(value).__name__}")
+        return validate_work_item_type(value)
+
+    # Iteration path validation (requires project context, handled separately)
+    # String fields that need HTML sanitization to prevent XSS
+    html_fields = {
+        'System.Description',
+        'System.Title',
+        'Microsoft.VSTS.Common.AcceptanceCriteria',
+        'Microsoft.VSTS.TCM.ReproSteps'
+    }
+
+    if clean_field_name in html_fields:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValidationError(f"{clean_field_name} must be a string, got {type(value).__name__}")
+        # Basic HTML sanitization: escape dangerous characters
+        # Note: Azure DevOps has its own sanitization, but defense in depth is good
+        return sanitize_html_string(value)
+
+    # Numeric fields validation
+    numeric_fields = {
+        'Microsoft.VSTS.Scheduling.RemainingWork',
+        'Microsoft.VSTS.Scheduling.CompletedWork',
+        'Microsoft.VSTS.Scheduling.OriginalEstimate',
+        'Microsoft.VSTS.Scheduling.StoryPoints',
+        'Microsoft.VSTS.Scheduling.Effort',
+        'Microsoft.VSTS.Scheduling.Size',
+        'Microsoft.VSTS.Common.BusinessValue',
+        'Microsoft.VSTS.Common.StackRank',
+        'Microsoft.VSTS.Common.BacklogPriority'
+    }
+
+    if clean_field_name in numeric_fields:
+        if value is None:
+            return None
+        if not isinstance(value, (int, float)):
+            raise ValidationError(f"{clean_field_name} must be a number, got {type(value).__name__}")
+        if value < 0:
+            raise ValidationError(f"{clean_field_name} cannot be negative")
+        return value
+
+    # For other fields, return as-is (they're already validated by field name)
+    return value
+
+
+def sanitize_html_string(value: str, max_length: int = 100000) -> str:
+    """
+    Sanitize HTML content to prevent XSS attacks.
+
+    This is a basic sanitization - Azure DevOps has more comprehensive
+    sanitization, but defense in depth is important.
+
+    Args:
+        value: The HTML string to sanitize
+        max_length: Maximum allowed length
+
+    Returns:
+        Sanitized string
+
+    Raises:
+        ValidationError: If string is too long
+    """
+    if value is None:
+        return None
+
+    # Check length to prevent DoS
+    if len(value) > max_length:
+        raise ValidationError(
+            f"String too long: {len(value)} characters (max: {max_length})"
+        )
+
+    # Remove null bytes
+    value = value.replace('\x00', '')
+
+    # Note: We don't escape HTML here because Azure DevOps expects
+    # HTML content in description fields. Azure DevOps will handle
+    # the HTML sanitization on their end. We just remove dangerous
+    # patterns and enforce length limits.
+
+    # Block script tags (case-insensitive)
+    if re.search(r'<script[^>]*>.*?</script>', value, re.IGNORECASE | re.DOTALL):
+        raise ValidationError("Script tags are not allowed in HTML content")
+
+    # Block javascript: protocol
+    if re.search(r'javascript:', value, re.IGNORECASE):
+        raise ValidationError("JavaScript protocol is not allowed")
+
+    # Block on* event handlers
+    if re.search(r'\son\w+\s*=', value, re.IGNORECASE):
+        raise ValidationError("Event handlers are not allowed in HTML content")
+
+    return value

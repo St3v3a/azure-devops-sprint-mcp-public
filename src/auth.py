@@ -10,6 +10,11 @@ from azure.devops.connection import Connection
 from msrest.authentication import BasicAuthentication
 import asyncio
 
+from datetime import datetime
+from collections import defaultdict, deque
+
+from .log_sanitizer import safe_log_error
+
 
 class AzureDevOpsAuth:
     """
@@ -25,15 +30,21 @@ class AzureDevOpsAuth:
     def __init__(self, organization_url: str):
         """
         Initialize authentication handler
-        
+
         Args:
-            organization_url: Azure DevOps organization URL 
+            organization_url: Azure DevOps organization URL
                             (e.g., https://dev.azure.com/yourorg)
         """
         self.organization_url = organization_url
         self.connection: Optional[Connection] = None
         self._credential = None
         self._auth_method = None
+
+        # Auth failure tracking
+        self._auth_failures = defaultdict(int)  # Count failures by method
+        self._auth_failure_timestamps = deque(maxlen=100)  # Track last 100 failures
+        self._last_auth_attempt = None
+        self._last_auth_success = None
     
     async def initialize(self):
         """Initialize and establish connection to Azure DevOps"""
@@ -43,17 +54,31 @@ class AzureDevOpsAuth:
             self._try_service_principal,
             self._try_pat
         ]
-        
+
+        self._last_auth_attempt = datetime.utcnow()
+
         for auth_method in auth_methods:
             try:
                 self.connection = await auth_method()
                 if self.connection:
+                    self._last_auth_success = datetime.utcnow()
                     print(f"✓ Authenticated using: {self._auth_method}", file=sys.stderr)
                     return
             except Exception as e:
-                print(f"✗ {auth_method.__name__} failed: {str(e)}", file=sys.stderr)
+                # Track authentication failure
+                method_name = auth_method.__name__
+                self._auth_failures[method_name] += 1
+                self._auth_failure_timestamps.append({
+                    'method': method_name,
+                    'timestamp': datetime.utcnow().isoformat(),
+                    'error_type': type(e).__name__
+                })
+
+                # Sanitize error message to prevent credential leakage
+                safe_error = safe_log_error(e, auth_method.__name__)
+                print(f"✗ {safe_error}", file=sys.stderr)
                 continue
-        
+
         raise ValueError(
             "Failed to authenticate. Please configure one of:\n"
             "1. Azure Managed Identity (recommended)\n"
@@ -148,26 +173,6 @@ class AzureDevOpsAuth:
         self._auth_method = "Personal Access Token"
         
         return Connection(base_url=self.organization_url, creds=credentials)
-    
-    async def _ensure_valid_token(self):
-        """
-        Automatically refresh token if expired or near expiry.
-
-        This method should be called before any API operation to ensure
-        the token is still valid.
-        """
-        import time
-
-        if self._token_expiry and self._credential:
-            current_time = time.time()
-            time_until_expiry = self._token_expiry - current_time
-
-            # Refresh if expired or within threshold
-            if time_until_expiry <= self._refresh_threshold_seconds:
-                logger.info(
-                    f"Token expiring in {time_until_expiry:.0f}s, refreshing..."
-                )
-                await self.refresh_token()
 
     def get_client(self, client_type: str):
         """
@@ -198,8 +203,13 @@ class AzureDevOpsAuth:
     
     async def refresh_token(self):
         """
-        Refresh the authentication token
-        Useful for long-running processes
+        Refresh the authentication token.
+
+        Important: For long-running processes (>1 hour), call this method
+        periodically to prevent token expiration. Tokens typically expire
+        after 1 hour for Managed Identity and Service Principal authentication.
+
+        Note: PAT (Personal Access Token) does not require refresh.
         """
         if self._credential and self._auth_method != "Personal Access Token":
             try:
@@ -214,9 +224,11 @@ class AzureDevOpsAuth:
                     base_url=self.organization_url,
                     creds=credentials
                 )
-                print("✓ Token refreshed successfully")
+                print("✓ Token refreshed successfully", file=sys.stderr)
             except Exception as e:
-                print(f"✗ Token refresh failed: {str(e)}")
+                # Sanitize error message to prevent credential leakage
+                safe_error = safe_log_error(e, "Token refresh failed")
+                print(f"✗ {safe_error}", file=sys.stderr)
                 raise
     
     async def close(self):
@@ -233,4 +245,22 @@ class AzureDevOpsAuth:
             "method": self._auth_method,
             "organization_url": self.organization_url,
             "authenticated": self.connection is not None
+        }
+
+    def get_auth_failure_stats(self) -> dict:
+        """
+        Get authentication failure statistics.
+
+        Returns:
+            Dictionary with failure counts, timestamps, and status
+        """
+        recent_failures = list(self._auth_failure_timestamps)[-10:]  # Last 10 failures
+
+        return {
+            "total_failures_by_method": dict(self._auth_failures),
+            "total_failures": sum(self._auth_failures.values()),
+            "recent_failures": recent_failures,
+            "last_auth_attempt": self._last_auth_attempt.isoformat() if self._last_auth_attempt else None,
+            "last_auth_success": self._last_auth_success.isoformat() if self._last_auth_success else None,
+            "currently_authenticated": self.connection is not None
         }

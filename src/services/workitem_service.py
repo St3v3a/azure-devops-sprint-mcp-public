@@ -15,9 +15,11 @@ from ..validation import (
     validate_state,
     validate_work_item_type,
     validate_field_name,
+    validate_field_value,
     validate_wiql,
     validate_iteration_path,
     validate_priority,
+    sanitize_wiql_string,
     ValidationError
 )
 from ..decorators import azure_devops_operation, validate_work_item_id
@@ -215,6 +217,9 @@ AND [System.AssignedTo] = @Me"""
             # Validate field name
             validate_field_name(field_name)
 
+            # Validate field value (type checking, XSS prevention, etc.)
+            validated_value = validate_field_value(field_name, value)
+
             # Ensure field name has proper format
             if not field_name.startswith('/fields/'):
                 field_path = f'/fields/{field_name}'
@@ -225,7 +230,7 @@ AND [System.AssignedTo] = @Me"""
                 JsonPatchOperation(
                     op='add',
                     path=field_path,
-                    value=value
+                    value=validated_value
                 )
             )
         
@@ -594,12 +599,15 @@ AND [System.AssignedTo] = @Me"""
         # Ensure limit doesn't exceed maximum
         limit = min(limit, QueryLimits.MAX_LIMIT)
 
+        # Sanitize search text to prevent WIQL injection
+        search_text_safe = sanitize_wiql_string(search_text)
+
         # Build WIQL query with Contains Words (indexed search)
         wiql_query = f"""
         SELECT TOP {limit} {format_wiql_fields(MY_WORK_ITEMS_FIELDS)}
         FROM WorkItems
         WHERE [System.TeamProject] = '{self.project}'
-          AND [{field}] Contains Words '{search_text}'
+          AND [{field}] Contains Words '{search_text_safe}'
         """
 
         if work_item_type:

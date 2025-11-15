@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from ..validation import (
     validate_iteration_path,
     validate_wiql,
+    sanitize_wiql_string,
     ValidationError
 )
 from ..decorators import azure_devops_operation
@@ -196,14 +197,18 @@ class SprintService(CachedService):
         if cached_result is not None:
             return cached_result
 
+        # Sanitize inputs to prevent WIQL injection
+        iteration_path_safe = sanitize_wiql_string(iteration_path)
+        project_safe = sanitize_wiql_string(self.project)
+
         # Build WIQL query with TOP clause and optimized field selection
         # Order by priority first (most selective), then creation date
         # Use a simpler query with just basic fields
         # Note: FROM WorkItems is case-sensitive in Azure DevOps WIQL
-        wiql_query = f"""SELECT [System.Id], [System.Title], [System.State], [System.WorkItemType]
+        wiql_query = f"""SELECT TOP {limit} [System.Id], [System.Title], [System.State], [System.WorkItemType]
 FROM WorkItems
-WHERE [System.IterationPath] = '{iteration_path}'
-AND [System.TeamProject] = '{self.project}'
+WHERE [System.IterationPath] = '{iteration_path_safe}'
+AND [System.TeamProject] = '{project_safe}'
 ORDER BY [System.CreatedDate] DESC"""
 
         # Validate WIQL query

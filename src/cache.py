@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Optional, Dict, Callable
 from functools import wraps
@@ -89,6 +90,9 @@ class Cache:
             'expirations': 0
         }
 
+        # Thread-safety lock for concurrent access
+        self._lock = threading.RLock()
+
         # Start cleanup task
         self._cleanup_task: Optional[asyncio.Task] = None
         self._start_cleanup()
@@ -121,19 +125,20 @@ class Cache:
         Returns:
             Number of entries removed
         """
-        before_count = len(self._cache)
-        self._cache = {
-            key: entry
-            for key, entry in self._cache.items()
-            if not entry.is_expired()
-        }
-        removed_count = before_count - len(self._cache)
+        with self._lock:
+            before_count = len(self._cache)
+            self._cache = {
+                key: entry
+                for key, entry in self._cache.items()
+                if not entry.is_expired()
+            }
+            removed_count = before_count - len(self._cache)
 
-        if removed_count > 0:
-            self._stats['expirations'] += removed_count
-            logger.debug(f"Cache cleanup: removed {removed_count} expired entries")
+            if removed_count > 0:
+                self._stats['expirations'] += removed_count
+                logger.debug(f"Cache cleanup: removed {removed_count} expired entries")
 
-        return removed_count
+            return removed_count
 
     def get(self, key: str) -> Optional[Any]:
         """
@@ -145,27 +150,28 @@ class Cache:
         Returns:
             Cached value or None if not found/expired
         """
-        entry = self._cache.get(key)
+        with self._lock:
+            entry = self._cache.get(key)
 
-        if entry is None:
-            self._stats['misses'] += 1
-            return None
+            if entry is None:
+                self._stats['misses'] += 1
+                return None
 
-        if entry.is_expired():
-            del self._cache[key]
-            self._stats['expirations'] += 1
-            self._stats['misses'] += 1
-            return None
+            if entry.is_expired():
+                del self._cache[key]
+                self._stats['expirations'] += 1
+                self._stats['misses'] += 1
+                return None
 
-        entry.record_hit()
-        self._stats['hits'] += 1
+            entry.record_hit()
+            self._stats['hits'] += 1
 
-        logger.debug(
-            f"Cache hit: {key} (age: {entry.age_seconds():.1f}s, "
-            f"hits: {entry.hit_count})"
-        )
+            logger.debug(
+                f"Cache hit: {key} (age: {entry.age_seconds():.1f}s, "
+                f"hits: {entry.hit_count})"
+            )
 
-        return entry.data
+            return entry.data
 
     def set(
         self,
@@ -181,14 +187,15 @@ class Cache:
             value: Value to cache
             ttl_seconds: TTL for this entry (uses default if None)
         """
-        # Check if we need to evict entries
-        if len(self._cache) >= self.max_size and key not in self._cache:
-            self._evict_oldest()
+        with self._lock:
+            # Check if we need to evict entries
+            if len(self._cache) >= self.max_size and key not in self._cache:
+                self._evict_oldest()
 
-        ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
-        self._cache[key] = CacheEntry(value, ttl)
+            ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
+            self._cache[key] = CacheEntry(value, ttl)
 
-        logger.debug(f"Cache set: {key} (TTL: {ttl}s)")
+            logger.debug(f"Cache set: {key} (TTL: {ttl}s)")
 
     def _evict_oldest(self):
         """Evict oldest entry to make room."""
@@ -215,11 +222,12 @@ class Cache:
         Returns:
             True if entry was removed, False if not found
         """
-        if key in self._cache:
-            del self._cache[key]
-            logger.debug(f"Cache invalidation: {key}")
-            return True
-        return False
+        with self._lock:
+            if key in self._cache:
+                del self._cache[key]
+                logger.debug(f"Cache invalidation: {key}")
+                return True
+            return False
 
     def invalidate_prefix(self, prefix: str) -> int:
         """
@@ -231,27 +239,29 @@ class Cache:
         Returns:
             Number of entries invalidated
         """
-        keys_to_remove = [
-            key for key in self._cache.keys()
-            if key.startswith(prefix)
-        ]
+        with self._lock:
+            keys_to_remove = [
+                key for key in self._cache.keys()
+                if key.startswith(prefix)
+            ]
 
-        for key in keys_to_remove:
-            del self._cache[key]
+            for key in keys_to_remove:
+                del self._cache[key]
 
-        if keys_to_remove:
-            logger.debug(
-                f"Cache invalidation: {len(keys_to_remove)} entries "
-                f"with prefix '{prefix}'"
-            )
+            if keys_to_remove:
+                logger.debug(
+                    f"Cache invalidation: {len(keys_to_remove)} entries "
+                    f"with prefix '{prefix}'"
+                )
 
-        return len(keys_to_remove)
+            return len(keys_to_remove)
 
     def clear(self):
         """Clear all cache entries."""
-        count = len(self._cache)
-        self._cache.clear()
-        logger.info(f"Cache cleared: {count} entries removed")
+        with self._lock:
+            count = len(self._cache)
+            self._cache.clear()
+            logger.info(f"Cache cleared: {count} entries removed")
 
     def get_stats(self) -> Dict[str, Any]:
         """
@@ -260,28 +270,54 @@ class Cache:
         Returns:
             Dictionary with cache statistics
         """
-        total_requests = self._stats['hits'] + self._stats['misses']
-        hit_rate = (
-            (self._stats['hits'] / total_requests * 100)
-            if total_requests > 0
-            else 0
-        )
+        with self._lock:
+            total_requests = self._stats['hits'] + self._stats['misses']
+            hit_rate = (
+                (self._stats['hits'] / total_requests * 100)
+                if total_requests > 0
+                else 0
+            )
 
-        return {
-            'size': len(self._cache),
-            'max_size': self.max_size,
-            'hits': self._stats['hits'],
-            'misses': self._stats['misses'],
-            'hit_rate_percent': round(hit_rate, 2),
-            'evictions': self._stats['evictions'],
-            'expirations': self._stats['expirations'],
-            'total_requests': total_requests
-        }
+            return {
+                'size': len(self._cache),
+                'max_size': self.max_size,
+                'hits': self._stats['hits'],
+                'misses': self._stats['misses'],
+                'hit_rate_percent': round(hit_rate, 2),
+                'evictions': self._stats['evictions'],
+                'expirations': self._stats['expirations'],
+                'total_requests': total_requests
+            }
 
-    def __del__(self):
-        """Cleanup on deletion."""
+    async def close(self):
+        """
+        Properly close the cache and cleanup resources.
+
+        This method should be called when shutting down to ensure
+        proper cleanup of async tasks.
+        """
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
+            try:
+                # Wait for the task to complete cancellation
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                # Expected when cancelling
+                pass
+            except Exception as e:
+                logger.error(f"Error during cache cleanup task cancellation: {e}")
+
+    def __del__(self):
+        """
+        Cleanup on deletion.
+
+        Note: This is synchronous and cannot await async tasks.
+        For proper cleanup, call close() before deletion.
+        """
+        if self._cleanup_task and not self._cleanup_task.done():
+            # Cancel the task, but we can't await it here
+            self._cleanup_task.cancel()
+            logger.warning("Cache cleanup task cancelled in __del__. Call close() for proper cleanup.")
 
 
 # Global cache instance
@@ -311,6 +347,19 @@ def get_cache(
         )
 
     return _global_cache
+
+
+async def close_global_cache():
+    """
+    Close the global cache instance properly.
+
+    This should be called during application shutdown.
+    """
+    global _global_cache
+
+    if _global_cache is not None:
+        await _global_cache.close()
+        _global_cache = None
 
 
 def make_cache_key(*args, **kwargs) -> str:

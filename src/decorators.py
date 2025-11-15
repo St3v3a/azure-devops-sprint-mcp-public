@@ -61,8 +61,33 @@ def handle_ado_error(func: Callable[..., T]) -> Callable[..., T]:
                     status_code = getattr(response, 'status_code', None)
 
             if status_code:
-                # Map to custom error
-                error = map_status_code_to_error(status_code, original_error=e)
+                # Extract additional headers for rate limiting
+                retry_after = None
+                if status_code == 429:
+                    # Try to extract Retry-After header
+                    if hasattr(e, 'response') and e.response:
+                        response = e.response
+                        # Try to get headers from response
+                        if hasattr(response, 'headers'):
+                            headers = response.headers
+                            # Retry-After can be in seconds or HTTP-date
+                            retry_after_header = headers.get('Retry-After') or headers.get('retry-after')
+                            if retry_after_header:
+                                try:
+                                    # Try to parse as integer (seconds)
+                                    retry_after = int(retry_after_header)
+                                except (ValueError, TypeError):
+                                    # If not an integer, might be HTTP-date format
+                                    # Default to 60 seconds if we can't parse
+                                    retry_after = 60
+                                    logger.warning(f"Could not parse Retry-After header: {retry_after_header}")
+
+                # Map to custom error with rate limit info
+                error = map_status_code_to_error(
+                    status_code,
+                    original_error=e,
+                    retry_after=retry_after if retry_after else None
+                )
                 logger.error(
                     f"Azure DevOps API error in {func.__name__}: {error}",
                     exc_info=True
