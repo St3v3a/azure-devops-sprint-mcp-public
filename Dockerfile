@@ -28,9 +28,9 @@ RUN pip install --no-cache-dir --upgrade pip && \
 FROM python:3.11-slim
 
 # Set metadata
-LABEL maintainer="your-email@company.com"
+LABEL maintainer="noreply@example.com"
 LABEL description="Azure DevOps Sprint MCP Server"
-LABEL version="2.0"
+LABEL version="2.1"
 
 # Install Azure CLI for user credential support
 RUN apt-get update && apt-get install -y \
@@ -64,7 +64,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 # Copy application code
 COPY src/ ./src/
-COPY README.md CLAUDE.md ./
+COPY README.md ./
 
 # Create directories for logs and cache, ensure home directory ownership
 RUN mkdir -p /app/logs /app/cache && \
