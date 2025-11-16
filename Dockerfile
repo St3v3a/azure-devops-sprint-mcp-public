@@ -49,8 +49,8 @@ ENV PYTHONUNBUFFERED=1 \
     AZURE_CORE_COLLECT_TELEMETRY=false \
     AZURE_CORE_NO_COLOR=true \
     AZURE_CORE_ONLY_SHOW_ERRORS=true \
-    # Set Azure DevOps cache to writable location
-    AZURE_DEVOPS_CACHE_DIR=/app/cache/.azure-devops
+    # Set Azure DevOps cache to temp directory (no persistence needed)
+    AZURE_DEVOPS_CACHE_DIR=/tmp/.azure-devops
 
 # Create non-root user for security with home directory
 RUN groupadd -r mcpuser && \
@@ -66,8 +66,8 @@ COPY --from=builder /opt/venv /opt/venv
 COPY src/ ./src/
 COPY README.md ./
 
-# Create directories for logs and cache, ensure home directory ownership
-RUN mkdir -p /app/logs /app/cache && \
+# Create directories for logs, ensure ownership
+RUN mkdir -p /app/logs && \
     chown -R mcpuser:mcpuser /app && \
     chown -R mcpuser:mcpuser /home/mcpuser
 

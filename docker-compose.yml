@@ -32,8 +32,6 @@ services:
       - ./src:/app/src:ro
       # Mount logs directory
       - ./logs:/app/logs
-      # Mount cache directory
-      - ./cache:/app/cache
       # Mount Azure credentials for user context authentication
       # This allows DefaultAzureCredential to use your 'az login' session
       # Note: Azure CLI needs write access for command logs

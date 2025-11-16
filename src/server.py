@@ -15,9 +15,17 @@ from .models import WorkItem, Sprint, WorkItemUpdate
 from .cache import close_global_cache
 
 
+# Global state for authentication and service manager
+# Initialized during lifespan startup
+_auth = None
+_service_manager = None
+
+
 @asynccontextmanager
 async def lifespan(app):
     """Initialize services on startup"""
+    global _auth, _service_manager
+
     # Load environment variables from .env file
     load_dotenv()
 
@@ -31,20 +39,16 @@ async def lifespan(app):
         )
 
     # Initialize authentication
-    auth = AzureDevOpsAuth(org_url)
-    await auth.initialize()
+    _auth = AzureDevOpsAuth(org_url)
+    await _auth.initialize()
 
     # Initialize service manager with optional default project
-    service_manager = ServiceManager(auth, default_project=default_project)
-
-    # Store in app state instead of global variables
-    app.state.auth = auth
-    app.state.service_manager = service_manager
+    _service_manager = ServiceManager(_auth, default_project=default_project)
 
     yield  # Server runs
 
     # Cleanup on shutdown
-    await auth.close()
+    await _auth.close()
     await close_global_cache()
 
 
@@ -77,8 +81,7 @@ async def get_my_work_items(
     Returns:
         List of work items with id, title, state, type, and assigned to
     """
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service(project)
+    workitem_service = _service_manager.get_workitem_service(project)
     await ctx.info(f"Fetching work items assigned to you from project: {workitem_service.project}...")
 
     items = await workitem_service.get_my_work_items(
@@ -109,8 +112,7 @@ async def get_sprint_work_items(
     Returns:
         Dictionary with sprint details and work items
     """
-    service_manager = ctx.app.state.service_manager
-    sprint_service = service_manager.get_sprint_service(project)
+    sprint_service = _service_manager.get_sprint_service(project)
 
     if iteration_path:
         await ctx.info(f"Fetching work items for sprint: {iteration_path} in project: {sprint_service.project}")
@@ -154,8 +156,7 @@ async def update_work_item(
     Returns:
         Updated work item details
     """
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service(project)
+    workitem_service = _service_manager.get_workitem_service(project)
     await ctx.info(f"Updating work item {work_item_id} in project: {workitem_service.project}...")
 
     result = await workitem_service.update_work_item(
@@ -186,8 +187,7 @@ async def add_comment(
     Returns:
         Comment details including ID and creation time
     """
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service(project)
+    workitem_service = _service_manager.get_workitem_service(project)
     await ctx.info(f"Adding comment to work item {work_item_id} in project: {workitem_service.project}...")
 
     result = await workitem_service.add_comment(work_item_id, comment)
@@ -222,8 +222,7 @@ async def create_work_item(
     Returns:
         Created work item details including ID
     """
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service(project)
+    workitem_service = _service_manager.get_workitem_service(project)
     await ctx.info(f"Creating new {work_item_type} in project: {workitem_service.project}: {title}")
 
     result = await workitem_service.create_work_item(
@@ -257,8 +256,7 @@ async def move_to_sprint(
     Returns:
         Updated work item details
     """
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service(project)
+    workitem_service = _service_manager.get_workitem_service(project)
     await ctx.info(f"Moving work item {work_item_id} to sprint: {iteration_path} in project: {workitem_service.project}")
 
     result = await workitem_service.update_work_item(
@@ -286,8 +284,7 @@ async def get_work_item_details(
     Returns:
         Complete work item details including all fields and relations
     """
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service(project)
+    workitem_service = _service_manager.get_workitem_service(project)
     await ctx.info(f"Fetching details for work item {work_item_id} from project: {workitem_service.project}...")
 
     result = await workitem_service.get_work_item(work_item_id)
@@ -311,8 +308,7 @@ async def get_team_iterations(
     Returns:
         List of iterations with name, path, start date, and end date
     """
-    service_manager = ctx.app.state.service_manager
-    sprint_service = service_manager.get_sprint_service(project)
+    sprint_service = _service_manager.get_sprint_service(project)
     await ctx.info(f"Fetching team iterations from project: {sprint_service.project}...")
 
     iterations = await sprint_service.get_team_iterations(team_name)
@@ -337,8 +333,7 @@ async def get_current_sprint(
     Returns:
         Current sprint details including dates and work items summary
     """
-    service_manager = ctx.app.state.service_manager
-    sprint_service = service_manager.get_sprint_service(project)
+    sprint_service = _service_manager.get_sprint_service(project)
     await ctx.info(f"Fetching current sprint information from project: {sprint_service.project}...")
 
     result = await sprint_service.get_current_sprint(team_name)
@@ -354,8 +349,7 @@ async def get_current_sprint(
 @mcp.resource("sprint://current")
 async def current_sprint_resource(ctx: Context = None) -> str:
     """Provides overview of the current sprint (uses default project)"""
-    service_manager = ctx.app.state.service_manager
-    sprint_service = service_manager.get_sprint_service()
+    sprint_service = _service_manager.get_sprint_service()
     sprint = await sprint_service.get_current_sprint()
 
     return f"""# Current Sprint: {sprint['name']}
@@ -378,8 +372,7 @@ async def current_sprint_resource(ctx: Context = None) -> str:
 @mcp.resource("sprint://{iteration_path}")
 async def sprint_resource(iteration_path: str, ctx: Context = None) -> str:
     """Provides details about a specific sprint (uses default project)"""
-    service_manager = ctx.app.state.service_manager
-    sprint_service = service_manager.get_sprint_service()
+    sprint_service = _service_manager.get_sprint_service()
     result = await sprint_service.get_sprint_work_items(iteration_path=iteration_path)
 
     items_by_state = {}
@@ -408,8 +401,7 @@ async def sprint_resource(iteration_path: str, ctx: Context = None) -> str:
 @mcp.resource("workitem://{work_item_id}")
 async def workitem_resource(work_item_id: str, ctx: Context = None) -> str:
     """Provides full details about a specific work item (uses default project)"""
-    service_manager = ctx.app.state.service_manager
-    workitem_service = service_manager.get_workitem_service()
+    workitem_service = _service_manager.get_workitem_service()
     wi = await workitem_service.get_work_item(int(work_item_id))
 
     return f"""# [{wi['id']}] {wi['title']}
@@ -450,7 +442,7 @@ async def health_check(ctx: Context = None) -> Dict[str, Any]:
     """
     try:
         # Verify auth is still valid
-        auth = ctx.app.state.auth
+        auth = _auth
         auth_info = auth.get_auth_info() if auth else None
         auth_failure_stats = auth.get_auth_failure_stats() if auth else {}
 
@@ -482,12 +474,11 @@ async def get_service_statistics(ctx: Context = None) -> Dict[str, Any]:
         Dictionary with service manager stats and loaded projects
     """
     try:
-        service_manager = ctx.app.state.service_manager
-        if not service_manager:
+        if not _service_manager:
             return {"error": "Service manager not initialized"}
 
-        stats = service_manager.get_statistics()
-        loaded_projects = service_manager.get_loaded_projects()
+        stats = _service_manager.get_statistics()
+        loaded_projects = _service_manager.get_loaded_projects()
 
         return {
             "service_manager": stats,

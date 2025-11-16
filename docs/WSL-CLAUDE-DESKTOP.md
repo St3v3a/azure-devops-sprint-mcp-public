@@ -1,6 +1,17 @@
 # Windows + WSL + Claude Desktop Setup Guide
 
-Complete guide for Windows users to connect Claude Desktop to the MCP server running in Docker (WSL).
+> **Complete guide for Windows users to connect Claude Desktop to the MCP server running in Docker (WSL)**
+
+## Quick Summary
+
+If you're on Windows and want to use this MCP server with Claude Desktop:
+
+1. **In WSL (Ubuntu)**: Clone repo → Create `.env` → Run `az login` → Start Docker container
+2. **Copy bridge script** from WSL to Windows user directory
+3. **Configure Claude Desktop** on Windows to use the bridge script
+4. **Restart Claude Desktop** - Done!
+
+Total setup time: ~10 minutes
 
 ## Table of Contents
 - [Overview](#overview)
@@ -105,34 +116,47 @@ There are **two bridge implementations** - both do the same thing:
 
 ## Setup Instructions
 
-### Step 1: Start Docker Container (WSL)
+### Step 1: Clone and Configure (WSL)
 
 ```bash
 # Open WSL terminal (Ubuntu)
-cd /path/to/azure-devops-sprint-mcp
+cd ~  # or your preferred directory
 
-# Login to Azure
+# Clone repository
+git clone https://github.com/yourusername/azure-devops-sprint-mcp.git
+cd azure-devops-sprint-mcp
+
+# Create .env file from template
+cp .env.example .env
+
+# Edit .env with your settings (REQUIRED!)
+nano .env  # Use nano, vim, or any editor
+
+# The .env file must have:
+# AZURE_DEVOPS_ORG_URL=https://dev.azure.com/your-organization
+# AZURE_DEVOPS_PROJECT=YourProject
+```
+
+### Step 2: Authenticate and Start Docker (WSL)
+
+```bash
+# Login to Azure (required for Managed Identity auth)
 az login
-az account show  # Verify login
-
-# Configure environment
-cat > .env <<EOF
-AZURE_DEVOPS_ORG_URL=https://dev.azure.com/yourorg
-AZURE_DEVOPS_PROJECT=YourProject
-EOF
+az account show  # Verify you're logged in
 
 # Start Docker container
 docker-compose up -d
 
-# Verify container is running
+# Verify container is running and healthy
 docker ps | grep azure-devops-mcp
-# Should show: azure-devops-mcp (Up)
+# Should show: azure-devops-mcp (Up X minutes) (healthy)
 
-# Test server in container
-docker exec azure-devops-mcp python -c "print('Container is working!')"
+# Check logs for successful authentication
+docker-compose logs
+# Should see: "✓ Authenticated using: Azure Managed Identity / DefaultAzureCredential"
 ```
 
-### Step 2: Copy Bridge Scripts to Windows
+### Step 3: Copy Bridge Scripts to Windows
 
 The bridge scripts need to be accessible from Windows (not WSL filesystem).
 
@@ -157,7 +181,7 @@ mkdir -p /mnt/c/Users/$USER/azure-devops-mcp
 cp scripts/run_docker_stdio.* /mnt/c/Users/$USER/azure-devops-mcp/
 ```
 
-### Step 3: Configure Claude Desktop (Windows)
+### Step 4: Configure Claude Desktop (Windows)
 
 **Using Batch Bridge (Simplest):**
 

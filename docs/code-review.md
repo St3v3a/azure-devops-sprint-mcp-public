@@ -579,6 +579,91 @@ The codebase demonstrated strong architectural principles and good practices fro
 
 ---
 
+---
+
+## 🐳 Docker Configuration Improvements (Post-Release)
+
+### 11. Azure DevOps SDK Cache Permission Issue ⚠️ HIGH
+
+**Severity**: High
+**Status**: ✅ Fixed
+**Impact**: High - Container startup failures in production
+
+#### Issue
+
+**Location**: `Dockerfile`, `docker-compose.yml`
+
+The Azure DevOps SDK automatically creates a cache directory at startup. The original configuration used `/app/cache/.azure-devops` which caused permission errors when:
+- Docker volumes were mounted with root ownership
+- The container ran as non-root user `mcpuser`
+
+Error encountered:
+```
+PermissionError: [Errno 13] Permission denied: '/app/cache/.azure-devops'
+```
+
+This prevented the container from starting entirely.
+
+#### Root Cause
+
+1. Volume mounts from host retain host ownership (often root)
+2. The `chown` command in Dockerfile only affects the image, not mounted volumes
+3. Azure DevOps SDK creates cache on module import (before app startup)
+
+#### Fix Applied
+
+**Changed cache location from persistent volume to temporary directory:**
+
+1. **Dockerfile** - Updated `AZURE_DEVOPS_CACHE_DIR`:
+   ```dockerfile
+   # Before
+   AZURE_DEVOPS_CACHE_DIR=/app/cache/.azure-devops
+
+   # After - Use temp directory (always writable)
+   AZURE_DEVOPS_CACHE_DIR=/tmp/.azure-devops
+   ```
+
+2. **docker-compose.yml** - Removed cache volume mount:
+   ```yaml
+   # Removed (no longer needed):
+   # - ./cache:/app/cache
+   ```
+
+3. **Simplified Dockerfile** - Removed unnecessary cache directory creation:
+   ```dockerfile
+   # Before
+   RUN mkdir -p /app/logs /app/cache/.azure-devops && \
+       chown -R mcpuser:mcpuser /app && \
+       chmod -R 755 /app/cache
+
+   # After
+   RUN mkdir -p /app/logs && \
+       chown -R mcpuser:mcpuser /app
+   ```
+
+#### Why This Works
+
+- `/tmp` is **always writable** in Linux containers (standard POSIX behavior)
+- SDK cache contains only metadata (not critical to persist)
+- Application cache (`src/cache.py`) is **in-memory** and unaffected
+- Simplified deployment (no volume permission management needed)
+
+#### Impact
+
+✅ Container starts successfully without permission errors
+✅ No manual volume permission setup required
+✅ Simpler production deployment (one less volume to manage)
+✅ SDK cache recreated on restart (minimal overhead)
+
+**Files Modified**:
+- `Dockerfile`
+- `docker-compose.yml`
+
+**Related**: This complements the in-memory application cache (`src/cache.py`) which handles performance optimization for work item queries.
+
+---
+
 **Review Conducted By**: Claude Code Review
 **Review Date**: 2025-11-15
+**Updated**: 2025-11-16 (Docker cache fix)
 **Next Review**: Recommended in 6 months or before major release

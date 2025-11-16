@@ -22,70 +22,106 @@ Enterprise-grade MCP server for managing Azure DevOps work items, sprints, and b
 
 ### Prerequisites
 
-- Python 3.10+ or Docker
+- **Linux/macOS**: Python 3.10+ or Docker
+- **Windows**: Docker Desktop with WSL 2 → **[See Windows/WSL Guide](docs/WSL-CLAUDE-DESKTOP.md)**
 - Azure DevOps organization access
 - Authentication: Azure CLI (`az login`), Service Principal, or PAT
 
-### Option 1: Docker (Recommended)
+---
+
+### Step 1: Clone and Configure
 
 ```bash
 # Clone repository
 git clone https://github.com/yourusername/azure-devops-sprint-mcp.git
 cd azure-devops-sprint-mcp
 
-# Run setup script
+# Create .env file from template
+cp .env.example .env
+
+# Edit .env with your settings (required!)
+nano .env  # or use your preferred editor
+```
+
+**Required in .env:**
+```bash
+AZURE_DEVOPS_ORG_URL=https://dev.azure.com/your-organization
+AZURE_DEVOPS_PROJECT=YourProject  # Recommended
+```
+
+---
+
+### Step 2: Choose Your Deployment Mode
+
+#### Option A: Docker (Recommended)
+
+```bash
+# Login to Azure for authentication
+az login
+
+# Start server with Docker
+docker-compose up -d
+
+# View logs
+docker-compose logs -f
+```
+
+#### Option B: Python (Local Development)
+
+```bash
+# Run setup script (creates venv, installs dependencies)
 ./scripts/setup.sh
 
-# Login to Azure
+# Login to Azure for authentication
 az login
 
 # Start server
 ./scripts/start.sh
-# Or directly: docker-compose up -d
 ```
 
-### Option 2: Python (Local Development)
+---
+
+### Quick Verification
 
 ```bash
-# Clone repository
-git clone https://github.com/yourusername/azure-devops-sprint-mcp.git
-cd azure-devops-sprint-mcp
+# Check server is running
+curl http://localhost:8000/mcp
 
-# Run setup script (creates venv, installs deps, configures .env)
-./scripts/setup.sh
+# Check Docker logs (if using Docker)
+docker-compose logs
 
-# Start server
-./scripts/start.sh
-```
-
-### Option 3: Automated Setup
-
-```bash
-# One-command setup and start
-git clone https://github.com/yourusername/azure-devops-sprint-mcp.git
-cd azure-devops-sprint-mcp
-./scripts/setup.sh && ./scripts/start.sh
+# Stop server
+docker-compose down  # Docker mode
+# OR
+./scripts/stop.sh    # Python mode
 ```
 
 ## ⚙️ Configuration
 
-Create `.env` file in project root:
+The `.env` file supports these options:
 
 ```bash
 # Required
 AZURE_DEVOPS_ORG_URL=https://dev.azure.com/your-organization
 
-# Optional (recommended as default project)
+# Recommended (default project for multi-project support)
 AZURE_DEVOPS_PROJECT=MyProject
 
-# Authentication (Managed Identity is preferred - just run 'az login')
-# AZURE_DEVOPS_PAT=your-pat-token              # For development only
-# AZURE_CLIENT_ID=your-client-id               # For Service Principal
+# Authentication Methods (choose one)
+# 1. Managed Identity (Recommended) - Just run 'az login', no config needed!
+# 2. Service Principal (for automation)
+# AZURE_CLIENT_ID=your-client-id
 # AZURE_CLIENT_SECRET=your-client-secret
 # AZURE_TENANT_ID=your-tenant-id
+# 3. Personal Access Token (legacy)
+# AZURE_DEVOPS_PAT=your-pat-token
+
+# Server Settings (optional)
+# MCP_TRANSPORT=http
+# PORT=8000
 ```
 
-**Recommended:** Use Azure Managed Identity (just run `az login` - no tokens needed!)
+**Recommended:** Use Azure Managed Identity (`az login`) - no tokens to manage, automatic refresh, and preserves your user identity in Azure DevOps audit logs.
 
 ## 📖 Documentation
 
@@ -227,6 +263,10 @@ See [docs/DOCKER.md](docs/DOCKER.md) for:
 - Azure Container Instances (ACI) deployment
 - Health checks and monitoring
 - Environment configuration
+
+### Important Notes
+
+**Cache Configuration**: The Azure DevOps SDK cache is stored in `/tmp/.azure-devops` (ephemeral, recreated on container restart). The application's performance cache (`src/cache.py`) is in-memory and provides 95%+ hit rates for work item queries. No persistent cache volume is needed, simplifying deployment and avoiding permission issues.
 
 ## 🖥️ Claude Desktop Integration
 
@@ -403,10 +443,11 @@ See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for comprehensive trouble
 ## 📊 Performance
 
 - ✅ **70% smaller responses** - Specific field selection vs expand='All'
-- ✅ **95%+ cache hit rate** - TTL-based caching with auto-invalidation
-- ✅ **Sub-second cached queries** - In-memory LRU cache
+- ✅ **95%+ cache hit rate** - TTL-based in-memory caching with auto-invalidation
+- ✅ **Sub-second cached queries** - In-memory LRU cache (no persistent storage needed)
 - ✅ **Automatic retry** - Exponential backoff for transient errors
 - ✅ **Query limits enforced** - No unbounded result sets
+- ✅ **Simplified deployment** - SDK cache in `/tmp` (no volume permission management)
 
 ## 🤝 Contributing
 
