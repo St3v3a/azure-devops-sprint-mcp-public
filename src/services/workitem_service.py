@@ -119,10 +119,10 @@ AND [System.AssignedTo] = @Me"""
         # Get work item IDs
         ids = [item.id for item in query_result.work_items]
 
-        # Fetch work items with all fields
+        # Fetch work items with optimized field selection (70% smaller than expand='All')
         work_items = self.wit_client.get_work_items(
             ids=ids,
-            expand='All'
+            fields=fields_to_string(MY_WORK_ITEMS_FIELDS)
         )
 
         # Format response
@@ -703,6 +703,614 @@ AND [System.AssignedTo] = @Me"""
 
         # Get work item IDs
         ids = [item.id for item in query_result.work_items]
+
+        # Fetch work items
+        work_items = await self._batch_get_work_items(
+            ids,
+            fields=MY_WORK_ITEMS_FIELDS,
+            expand=ExpandOptions.NONE
+        )
+
+        return [self._format_work_item(wi) for wi in work_items]
+
+    @validate_work_item_id
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def add_work_item_link(
+        self,
+        source_id: int,
+        target_id: int,
+        link_type: str = LinkTypes.RELATED,
+        comment: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Add a link between two work items.
+
+        Args:
+            source_id: Source work item ID
+            target_id: Target work item ID
+            link_type: Type of link to create. Options from LinkTypes:
+                - HIERARCHY_FORWARD: Parent->Child
+                - HIERARCHY_REVERSE: Child->Parent
+                - RELATED: Related link
+                - DEPENDENCY_FORWARD: Predecessor->Successor
+                - DEPENDENCY_REVERSE: Successor->Predecessor
+            comment: Optional comment for the link
+
+        Returns:
+            Updated source work item
+
+        Raises:
+            ValidationError: If link type is invalid
+            WorkItemNotFoundError: If source or target doesn't exist
+        """
+        from ..validation import validate_link_type
+
+        # Validate link type
+        validate_link_type(link_type)
+
+        # Validate target exists
+        _ = await self.get_work_item(target_id, include_comments=False)
+
+        # Build patch document
+        patches = [
+            JsonPatchOperation(
+                op="add",
+                path="/relations/-",
+                value={
+                    "rel": link_type,
+                    "url": f"{self.auth.organization_url}/{self.project}/_apis/wit/workItems/{target_id}",
+                    "attributes": {
+                        "comment": comment
+                    } if comment else {}
+                }
+            )
+        ]
+
+        # Update work item
+        updated_wi = self.wit_client.update_work_item(
+            document=patches,
+            id=source_id,
+            project=self.project
+        )
+
+        # Invalidate cache
+        self.invalidate_cache(source_id)
+
+        return self._format_work_item(updated_wi)
+
+    @validate_work_item_id
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def remove_work_item_link(
+        self,
+        source_id: int,
+        target_id: int,
+        link_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Remove a link between two work items.
+
+        Args:
+            source_id: Source work item ID
+            target_id: Target work item ID
+            link_type: Optional link type to remove. If None, removes all link types.
+
+        Returns:
+            Updated source work item
+
+        Raises:
+            WorkItemNotFoundError: If source doesn't exist or link not found
+        """
+        from ..validation import validate_link_type
+
+        if link_type:
+            validate_link_type(link_type)
+
+        # Get current work item with relations
+        source_wi = self.wit_client.get_work_item(
+            id=source_id,
+            expand=ExpandOptions.RELATIONS
+        )
+
+        if not source_wi.relations:
+            from ..errors import WorkItemNotFoundError
+            raise WorkItemNotFoundError(f"Work item {source_id} has no relations")
+
+        # Find the relation index to remove
+        relation_index = None
+        for idx, relation in enumerate(source_wi.relations):
+            if relation.url and str(target_id) in relation.url:
+                if link_type is None or relation.rel == link_type:
+                    relation_index = idx
+                    break
+
+        if relation_index is None:
+            from ..errors import WorkItemNotFoundError
+            raise WorkItemNotFoundError(
+                f"Link from {source_id} to {target_id} "
+                f"{'with type ' + link_type if link_type else ''} not found"
+            )
+
+        # Build patch document to remove relation
+        patches = [
+            JsonPatchOperation(
+                op="remove",
+                path=f"/relations/{relation_index}"
+            )
+        ]
+
+        # Update work item
+        updated_wi = self.wit_client.update_work_item(
+            document=patches,
+            id=source_id,
+            project=self.project
+        )
+
+        # Invalidate cache
+        self.invalidate_cache(source_id)
+
+        return self._format_work_item(updated_wi)
+
+    @validate_work_item_id
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_linked_work_items(
+        self,
+        work_item_id: int,
+        link_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get work items linked to a specific work item.
+
+        Args:
+            work_item_id: Work item ID to get links from
+            link_type: Optional filter by link type
+
+        Returns:
+            List of linked work items with link type information
+
+        Raises:
+            WorkItemNotFoundError: If work item doesn't exist
+        """
+        from ..validation import validate_link_type
+
+        if link_type:
+            validate_link_type(link_type)
+
+        # Get work item with relations
+        wi = self.wit_client.get_work_item(
+            id=work_item_id,
+            expand=ExpandOptions.RELATIONS
+        )
+
+        if not wi.relations:
+            return []
+
+        # Filter relations to work item links only (not attachments, hyperlinks, etc.)
+        linked_items = []
+        linked_ids = []
+
+        for relation in wi.relations:
+            # Filter by link type if specified
+            if link_type and relation.rel != link_type:
+                continue
+
+            # Extract work item ID from URL
+            if relation.url and '/workItems/' in relation.url:
+                try:
+                    linked_id = int(relation.url.split('/workItems/')[-1])
+                    linked_ids.append(linked_id)
+                    linked_items.append({
+                        'id': linked_id,
+                        'link_type': relation.rel,
+                        'comment': relation.attributes.get('comment') if relation.attributes else None
+                    })
+                except (ValueError, IndexError):
+                    continue
+
+        if not linked_ids:
+            return []
+
+        # Fetch full details of linked work items
+        work_items = await self._batch_get_work_items(
+            linked_ids,
+            fields=MY_WORK_ITEMS_FIELDS,
+            expand=ExpandOptions.NONE
+        )
+
+        # Merge link info with work item details
+        wi_dict = {wi.id: self._format_work_item(wi) for wi in work_items}
+
+        result = []
+        for link_info in linked_items:
+            if link_info['id'] in wi_dict:
+                item = wi_dict[link_info['id']].copy()
+                item['link_type'] = link_info['link_type']
+                if link_info['comment']:
+                    item['link_comment'] = link_info['comment']
+                result.append(item)
+
+        return result
+
+    @azure_devops_operation(timeout_seconds=60, max_retries=3)
+    async def batch_update_work_items(
+        self,
+        updates: List[Dict[str, Any]],
+        max_batch_size: int = 200
+    ) -> List[Dict[str, Any]]:
+        """
+        Update multiple work items in a single operation.
+
+        Args:
+            updates: List of update dictionaries, each containing:
+                - id: Work item ID (required)
+                - fields: Dictionary of fields to update (required)
+                - comment: Optional comment
+            max_batch_size: Maximum number of items per batch (default: 200)
+
+        Returns:
+            List of updated work items
+
+        Raises:
+            ValidationError: If batch size exceeds maximum or updates are invalid
+
+        Example:
+            updates = [
+                {"id": 123, "fields": {"System.State": "Active"}},
+                {"id": 124, "fields": {"System.State": "Active"}, "comment": "Updated"}
+            ]
+            results = await service.batch_update_work_items(updates)
+        """
+        from ..validation import ValidationError
+
+        if not updates:
+            return []
+
+        if len(updates) > max_batch_size:
+            raise ValidationError(
+                f"Batch size {len(updates)} exceeds maximum {max_batch_size}"
+            )
+
+        # Validate all updates have required fields
+        for idx, update in enumerate(updates):
+            if 'id' not in update:
+                raise ValidationError(f"Update at index {idx} missing 'id' field")
+            if 'fields' not in update:
+                raise ValidationError(f"Update at index {idx} missing 'fields' field")
+
+        # Process each update
+        results = []
+        for update in updates:
+            work_item_id = update['id']
+            fields = update['fields']
+            comment = update.get('comment')
+
+            # Use existing update method
+            try:
+                result = await self.update_work_item(
+                    work_item_id=work_item_id,
+                    fields=fields,
+                    comment=comment
+                )
+                results.append(result)
+            except Exception as e:
+                # Include error in results
+                results.append({
+                    'id': work_item_id,
+                    'error': str(e),
+                    'success': False
+                })
+
+        return results
+
+    @azure_devops_operation(timeout_seconds=60, max_retries=3)
+    async def create_child_work_items(
+        self,
+        parent_id: int,
+        children: List[Dict[str, Any]],
+        max_batch_size: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Create multiple child work items under a parent in a single operation.
+
+        Automatically creates hierarchical links (parent-child) for each created item.
+
+        Args:
+            parent_id: Parent work item ID
+            children: List of child work item specs, each containing:
+                - title: Work item title (required)
+                - work_item_type: Type (required, e.g., "Task", "Bug")
+                - description: Optional description
+                - assigned_to: Optional assignee email
+                - priority: Optional priority (1-4)
+                - iteration_path: Optional sprint
+            max_batch_size: Maximum number of children per batch (default: 50)
+
+        Returns:
+            List of created child work items with link information
+
+        Raises:
+            ValidationError: If batch size exceeds maximum or children are invalid
+            WorkItemNotFoundError: If parent doesn't exist
+
+        Example:
+            children = [
+                {"title": "Task 1", "work_item_type": "Task"},
+                {"title": "Task 2", "work_item_type": "Task", "assigned_to": "user@example.com"}
+            ]
+            results = await service.create_child_work_items(parent_id=123, children=children)
+        """
+        from ..validation import ValidationError
+
+        if not children:
+            return []
+
+        if len(children) > max_batch_size:
+            raise ValidationError(
+                f"Batch size {len(children)} exceeds maximum {max_batch_size}"
+            )
+
+        # Validate parent exists
+        _ = await self.get_work_item(parent_id, include_comments=False)
+
+        # Validate all children have required fields
+        for idx, child in enumerate(children):
+            if 'title' not in child:
+                raise ValidationError(f"Child at index {idx} missing 'title' field")
+            if 'work_item_type' not in child:
+                raise ValidationError(f"Child at index {idx} missing 'work_item_type' field")
+
+        # Create each child work item
+        results = []
+        for child in children:
+            try:
+                # Create the child work item
+                created = await self.create_work_item(
+                    title=child['title'],
+                    work_item_type=child['work_item_type'],
+                    description=child.get('description'),
+                    assigned_to=child.get('assigned_to'),
+                    iteration_path=child.get('iteration_path'),
+                    priority=child.get('priority')
+                )
+
+                # Link child to parent
+                await self.add_work_item_link(
+                    source_id=parent_id,
+                    target_id=created['id'],
+                    link_type=LinkTypes.HIERARCHY_FORWARD,
+                    comment=f"Auto-linked during batch child creation"
+                )
+
+                # Add parent_id to result for reference
+                created['parent_id'] = parent_id
+                created['success'] = True
+                results.append(created)
+
+            except Exception as e:
+                # Include error in results
+                results.append({
+                    'title': child['title'],
+                    'error': str(e),
+                    'success': False
+                })
+
+        return results
+
+    @validate_work_item_id
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_work_item_revisions(
+        self,
+        work_item_id: int,
+        top: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get historical revisions of a work item.
+
+        Shows who changed what and when for full audit trail.
+
+        Args:
+            work_item_id: Work item ID
+            top: Optional limit on number of revisions to return
+
+        Returns:
+            List of revisions ordered by revision number (newest first)
+
+        Raises:
+            WorkItemNotFoundError: If work item doesn't exist
+        """
+        # Get all revisions
+        revisions = self.wit_client.get_revisions(
+            id=work_item_id,
+            project=self.project,
+            top=top
+        )
+
+        # Format revisions
+        result = []
+        for rev in revisions:
+            fields = rev.fields or {}
+            result.append({
+                'id': rev.id,
+                'rev': rev.rev,
+                'changed_by': self._format_identity(fields.get('System.ChangedBy')),
+                'changed_date': self._format_date(fields.get('System.ChangedDate')),
+                'state': fields.get('System.State'),
+                'title': fields.get('System.Title'),
+                'work_item_type': fields.get('System.WorkItemType'),
+                'assigned_to': self._format_identity(fields.get('System.AssignedTo')),
+                'iteration_path': fields.get('System.IterationPath'),
+                'reason': fields.get('System.Reason')
+            })
+
+        return result
+
+    @validate_work_item_id
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_work_item_comments(
+        self,
+        work_item_id: int,
+        top: Optional[int] = None,
+        skip: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get comments for a work item with pagination support.
+
+        Args:
+            work_item_id: Work item ID
+            top: Optional limit on number of comments to return
+            skip: Optional number of comments to skip (for pagination)
+
+        Returns:
+            List of comments ordered by creation date (newest first)
+
+        Raises:
+            WorkItemNotFoundError: If work item doesn't exist
+        """
+        # Get comments
+        comments_response = self.wit_client.get_comments(
+            project=self.project,
+            work_item_id=work_item_id,
+            top=top,
+            skip=skip
+        )
+
+        # Format comments
+        result = []
+        for comment in comments_response.comments:
+            result.append({
+                'id': comment.id,
+                'text': comment.text,
+                'created_by': self._format_identity(comment.created_by) if hasattr(comment, 'created_by') else None,
+                'created_date': self._format_date(comment.created_date) if hasattr(comment, 'created_date') else None,
+                'modified_by': self._format_identity(comment.modified_by) if hasattr(comment, 'modified_by') else None,
+                'modified_date': self._format_date(comment.modified_date) if hasattr(comment, 'modified_date') else None
+            })
+
+        return result
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_work_item_type(
+        self,
+        work_item_type_name: str
+    ) -> Dict[str, Any]:
+        """
+        Get work item type definition and metadata.
+
+        Retrieves the schema/definition for a work item type including
+        available fields, states, and transitions.
+
+        Args:
+            work_item_type_name: Work item type name (e.g., "Task", "Bug", "User Story")
+
+        Returns:
+            Work item type definition with fields and states
+
+        Raises:
+            ValidationError: If work item type is invalid
+        """
+        # Validate work item type
+        work_item_type_name = validate_work_item_type(work_item_type_name)
+
+        # Get work item type definition
+        wit_type = self.wit_client.get_work_item_type(
+            project=self.project,
+            type=work_item_type_name
+        )
+
+        # Format response
+        return {
+            'name': wit_type.name,
+            'description': wit_type.description,
+            'icon': wit_type.icon.id if wit_type.icon else None,
+            'color': wit_type.color,
+            'is_disabled': wit_type.is_disabled if hasattr(wit_type, 'is_disabled') else False,
+            'states': [state.name for state in wit_type.states] if wit_type.states else [],
+            'field_instances': [
+                {
+                    'name': field.name,
+                    'reference_name': field.reference_name,
+                    'always_required': field.always_required if hasattr(field, 'always_required') else False,
+                    'help_text': field.help_text if hasattr(field, 'help_text') else None
+                }
+                for field in (wit_type.field_instances or [])
+            ][:20]  # Limit to first 20 fields for readability
+        }
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_query(
+        self,
+        query_id: str,
+        depth: int = 1
+    ) -> Dict[str, Any]:
+        """
+        Get a saved WIQL query definition.
+
+        Args:
+            query_id: Query ID or path (e.g., "My Queries/Active Bugs")
+            depth: Query tree depth (1=query only, 2=query+children)
+
+        Returns:
+            Query definition with WIQL and metadata
+
+        Raises:
+            NotFoundError: If query doesn't exist
+        """
+        # Get query
+        query = self.wit_client.get_query(
+            project=self.project,
+            query=query_id,
+            depth=depth
+        )
+
+        # Format response
+        return {
+            'id': query.id,
+            'name': query.name,
+            'path': query.path,
+            'wiql': query.wiql if hasattr(query, 'wiql') else None,
+            'is_folder': query.is_folder if hasattr(query, 'is_folder') else False,
+            'is_public': query.is_public if hasattr(query, 'is_public') else False,
+            'created_by': self._format_identity(query.created_by) if hasattr(query, 'created_by') else None,
+            'created_date': self._format_date(query.created_date) if hasattr(query, 'created_date') else None,
+            'last_modified_by': self._format_identity(query.last_modified_by) if hasattr(query, 'last_modified_by') else None,
+            'last_modified_date': self._format_date(query.last_modified_date) if hasattr(query, 'last_modified_date') else None
+        }
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def execute_query_by_id(
+        self,
+        query_id: str,
+        limit: int = QueryLimits.DEFAULT_LIMIT
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute a saved query and return results.
+
+        Args:
+            query_id: Query ID or path
+            limit: Maximum number of results to return
+
+        Returns:
+            List of work items matching the query
+
+        Raises:
+            NotFoundError: If query doesn't exist
+        """
+        # Get and validate query
+        query = await self.get_query(query_id, depth=1)
+
+        if not query.get('wiql'):
+            from ..errors import ValidationError
+            raise ValidationError(f"Query '{query_id}' is a folder or has no WIQL")
+
+        # Execute query
+        from azure.devops.v7_1.work_item_tracking.models import Wiql
+        wiql = Wiql(query=query['wiql'])
+        query_result = self.wit_client.query_by_wiql(wiql, project=self.project)
+
+        if not query_result.work_items:
+            return []
+
+        # Get work item IDs
+        ids = [item.id for item in query_result.work_items[:limit]]
 
         # Fetch work items
         work_items = await self._batch_get_work_items(

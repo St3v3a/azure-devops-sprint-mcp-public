@@ -277,7 +277,291 @@ ORDER BY [System.CreatedDate] DESC"""
         self._set_cached(result, *cache_key_parts)
 
         return result
-    
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_backlogs(
+        self,
+        team_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get backlog levels for a team (e.g., Stories, Features, Epics).
+
+        Args:
+            team_name: Team name, or None for default team
+
+        Returns:
+            List of backlog levels with metadata
+        """
+        team = await self._get_team(team_name)
+
+        backlogs = self.work_client.get_backlogs(team_context=team)
+
+        return [
+            {
+                'id': backlog.id,
+                'name': backlog.name,
+                'rank': backlog.rank if hasattr(backlog, 'rank') else None,
+                'color': backlog.color if hasattr(backlog, 'color') else None,
+                'is_hidden': backlog.is_hidden if hasattr(backlog, 'is_hidden') else False,
+                'work_item_types': [
+                    wit.name for wit in (backlog.work_item_types or [])
+                ] if hasattr(backlog, 'work_item_types') else []
+            }
+            for backlog in backlogs
+        ]
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_backlog_work_items(
+        self,
+        backlog_id: str,
+        team_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get work items from a specific backlog level.
+
+        Args:
+            backlog_id: Backlog ID (e.g., "Microsoft.RequirementCategory", "Microsoft.FeatureCategory")
+            team_name: Team name, or None for default team
+
+        Returns:
+            List of work items in the backlog
+        """
+        team = await self._get_team(team_name)
+
+        # Get backlog work items
+        backlog_items = self.work_client.get_backlog_level_work_items(
+            team_context=team,
+            backlog_id=backlog_id
+        )
+
+        if not backlog_items.work_items:
+            return []
+
+        # Get work item IDs
+        ids = [item.target.id for item in backlog_items.work_items if item.target]
+
+        if not ids:
+            return []
+
+        # Fetch work items
+        work_items = self.wit_client.get_work_items(
+            ids=ids,
+            fields=fields_to_string(SPRINT_FIELDS)
+        )
+
+        return [self._format_work_item(wi) for wi in work_items]
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def create_iteration(
+        self,
+        name: str,
+        start_date: Optional[str] = None,
+        finish_date: Optional[str] = None,
+        path: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Create a new iteration/sprint.
+
+        Args:
+            name: Iteration name
+            start_date: Optional start date (ISO format: YYYY-MM-DD)
+            finish_date: Optional finish date (ISO format: YYYY-MM-DD)
+            path: Optional parent path (e.g., "ProjectName\\Iteration" or None for root)
+
+        Returns:
+            Created iteration details
+        """
+        from azure.devops.v7_1.work.models import WorkItemClassificationNode
+
+        # Build iteration node
+        attributes = {}
+        if start_date:
+            attributes['startDate'] = start_date
+        if finish_date:
+            attributes['finishDate'] = finish_date
+
+        iteration_node = WorkItemClassificationNode(
+            name=name,
+            attributes=attributes if attributes else None
+        )
+
+        # Create iteration
+        created = self.wit_client.create_or_update_classification_node(
+            posted_node=iteration_node,
+            project=self.project,
+            structure_group='iterations',
+            path=path
+        )
+
+        return {
+            'id': created.id,
+            'name': created.name,
+            'path': created.path,
+            'has_children': created.has_children if hasattr(created, 'has_children') else False,
+            'start_date': created.attributes.get('startDate') if created.attributes else None,
+            'finish_date': created.attributes.get('finishDate') if created.attributes else None
+        }
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def assign_iteration_to_team(
+        self,
+        iteration_id: str,
+        team_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Assign an iteration to a team.
+
+        Args:
+            iteration_id: Iteration ID (GUID)
+            team_name: Team name, or None for default team
+
+        Returns:
+            Team iteration details
+        """
+        from azure.devops.v7_1.work.models import TeamSettingsIteration
+
+        team = await self._get_team(team_name)
+
+        # Create team iteration
+        team_iteration = TeamSettingsIteration(id=iteration_id)
+
+        # Assign to team
+        result = self.work_client.post_team_iteration(
+            iteration=team_iteration,
+            team_context=team
+        )
+
+        return {
+            'id': result.id,
+            'name': result.name,
+            'path': result.path,
+            'start_date': result.attributes.start_date.isoformat() if result.attributes and result.attributes.start_date else None,
+            'finish_date': result.attributes.finish_date.isoformat() if result.attributes and result.attributes.finish_date else None
+        }
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def get_team_capacity(
+        self,
+        iteration_id: str,
+        team_name: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Get team member capacity for an iteration.
+
+        Args:
+            iteration_id: Iteration ID (GUID)
+            team_name: Team name, or None for default team
+
+        Returns:
+            List of team member capacities
+        """
+        team = await self._get_team(team_name)
+
+        capacities = self.work_client.get_capacity_with_identity_ref_and_totals(
+            team_context=team,
+            iteration_id=iteration_id
+        )
+
+        result = []
+        for capacity in capacities:
+            member_info = {
+                'team_member_id': capacity.team_member.id if capacity.team_member else None,
+                'display_name': capacity.team_member.display_name if capacity.team_member else None,
+                'activities': [
+                    {
+                        'name': activity.name,
+                        'capacity_per_day': activity.capacity_per_day
+                    }
+                    for activity in (capacity.activities or [])
+                ],
+                'days_off': [
+                    {
+                        'start': day_off.start.isoformat() if hasattr(day_off, 'start') and day_off.start else None,
+                        'end': day_off.end.isoformat() if hasattr(day_off, 'end') and day_off.end else None
+                    }
+                    for day_off in (capacity.days_off or [])
+                ]
+            }
+            result.append(member_info)
+
+        return result
+
+    @azure_devops_operation(timeout_seconds=30, max_retries=3)
+    async def update_team_capacity(
+        self,
+        iteration_id: str,
+        team_member_id: str,
+        activities: List[Dict[str, Any]],
+        days_off: Optional[List[Dict[str, str]]] = None,
+        team_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Update team member capacity for an iteration.
+
+        Args:
+            iteration_id: Iteration ID (GUID)
+            team_member_id: Team member ID (GUID)
+            activities: List of activities with name and capacity_per_day
+            days_off: Optional list of days off with start and end dates (ISO format)
+            team_name: Team name, or None for default team
+
+        Returns:
+            Updated capacity details
+        """
+        from azure.devops.v7_1.work.models import (
+            CapacityPatch,
+            Activity,
+            DateRange
+        )
+
+        team = await self._get_team(team_name)
+
+        # Build activities
+        activity_list = [
+            Activity(name=a['name'], capacity_per_day=a['capacity_per_day'])
+            for a in activities
+        ]
+
+        # Build days off
+        days_off_list = []
+        if days_off:
+            for day_off in days_off:
+                days_off_list.append(
+                    DateRange(
+                        start=datetime.fromisoformat(day_off['start']),
+                        end=datetime.fromisoformat(day_off['end'])
+                    )
+                )
+
+        # Create capacity patch
+        capacity_patch = CapacityPatch(
+            activities=activity_list,
+            days_off=days_off_list if days_off_list else None
+        )
+
+        # Update capacity
+        result = self.work_client.update_capacity_with_identity_ref(
+            patch=capacity_patch,
+            team_context=team,
+            iteration_id=iteration_id,
+            team_member_id=team_member_id
+        )
+
+        return {
+            'team_member_id': team_member_id,
+            'activities': [
+                {'name': a.name, 'capacity_per_day': a.capacity_per_day}
+                for a in (result.activities or [])
+            ],
+            'days_off': [
+                {
+                    'start': d.start.isoformat() if d.start else None,
+                    'end': d.end.isoformat() if d.end else None
+                }
+                for d in (result.days_off or [])
+            ]
+        }
+
     async def _get_team(self, team_name: Optional[str] = None):
         """
         Get team context
